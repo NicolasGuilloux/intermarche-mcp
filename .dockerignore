@@ -1,0 +1,23 @@
+# VCS / tooling
+.git
+.gitignore
+.claude
+.envrc
+.direnv
+.devenv*
+
+# Secrets / local runtime junk
+.env
+*.env
+nohup.out
+
+# Throwaway spike modules (separate go.mod, not part of the build)
+spike/
+
+# Docs and editor cruft
+docs/
+*.md
+.DS_Store
+
+# Prebuilt binary
+intermarche-mcp

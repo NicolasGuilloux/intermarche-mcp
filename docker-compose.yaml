@@ -1,0 +1,46 @@
+# Intermarché MCP server.
+#
+# A single static Go binary. DataDome is cleared over the network by the
+# Salamoonder solver — no browser at runtime.
+#
+#   docker compose up --build           # start the MCP server on :8080
+#   docker compose run --rm intermarche search "lait demi écrémé"
+#   docker compose run --rm intermarche orders
+#
+# Configuration comes from .env (see .env.example). At minimum:
+#   SALAMOONDER_API_KEY   — DataDome solver credit pool
+#   EMAIL / PASSWORD      — Intermarché account (browser-free ROPC login)
+# Optional: SALAMOONDER_PROXY — residential proxy if your egress IP is
+# penalised by DataDome (the host IP is used by default).
+
+services:
+  intermarche:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: intermarche-mcp:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MCP_ADDR: ":8080"
+    ports:
+      - "8080:8080"            # MCP Streamable HTTP
+    volumes:
+      # Holds tokens, selected store and the cached DataDome cookie.
+      #
+      # Default (IMT_CONFIG_DIR unset): a self-contained named volume. The
+      # container must mint its own DataDome cookie — reliable only with
+      # SALAMOONDER_PROXY set (a container's egress can break DataDome's
+      # IP-binding; see docker/README.md).
+      #
+      # Recommended when running next to a configured host: point
+      # IMT_CONFIG_DIR at that host's config dir to REUSE its session. The
+      # host's browser login (tokens) and its valid DataDome cookie are then
+      # shared, so auth works and no credit is spent. e.g. in .env:
+      #   macOS: IMT_CONFIG_DIR=$HOME/Library/Application Support/intermarche-mcp
+      #   Linux: IMT_CONFIG_DIR=$HOME/.config/intermarche-mcp
+      - ${IMT_CONFIG_DIR:-imt-config}:/data/intermarche-mcp
+
+volumes:
+  imt-config:
