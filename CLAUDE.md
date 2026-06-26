@@ -41,11 +41,12 @@ browser anywhere at runtime.
   is forced** (Go's default HTTP/2 fingerprint is flagged) and a **full Chrome
   header set** + the device fingerprint (from `itm_device_id`) are sent.
 - The cleared cookie is cached on disk (`<config>/datadome.json`) and reused; a
-  credit is only spent on an actual 403. Capped by `SALAMOONDER_MAX_SOLVES`
+  credit is only spent on an actual 403. Capped by `CAPTCHA_MAX_SOLVES`
   (default 1) so a broken-cookie loop can't drain the balance.
 - **IP binding (important):** Datadome binds the clearance to the IP context of
   the challenge, so the challenge fetch AND the API calls must egress from the
-  same IP. Set a residential proxy via `SALAMOONDER_PROXY` (or `IMT_PROXY`),
+  same IP. Set a residential proxy via `CAPTCHA_PROXY` (deprecated aliases
+  `SALAMOONDER_PROXY` / `IMT_PROXY`),
   e.g. `http://user:pass@host:port` — used for both. A cookie minted from one IP
   context (e.g. inside a container) can be rejected when used from another; see
   `docker/README.md`.

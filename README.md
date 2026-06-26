@@ -5,9 +5,9 @@
 
 CLI (and MCP server) for the Intermarché French grocery store. Browse products,
 manage your basket, and view order history by talking to the intermarche.com
-API. The site is behind DataDome anti-bot; every API call is wrapped through the
-Salamoonder solver, which clears it over the network — no browser anywhere (see
-[DataDome](#datadome)).
+API. The site is behind DataDome anti-bot; every API call is wrapped through a
+captcha solver (Salamoonder or 2Captcha), which clears it over the network — no
+browser anywhere (see [DataDome](#datadome)).
 
 > [!WARNING]
 > **Disclaimer — this application was vibecoded.** It was built largely through
@@ -57,8 +57,9 @@ Login itself is not an MCP tool — authenticate once with the `login` CLI comma
 
 ## Run it
 
-Pick one of the three ways below. All of them need a
-[`SALAMOONDER_API_KEY`](#configuration) when using the solver transport.
+Pick one of the three ways below. All of them need a captcha solver key —
+`SALAMOONDER_API_KEY` (default) or `TWOCAPTCHA_API_KEY` with
+`CAPTCHA_PROVIDER=2captcha` (see [DataDome](#datadome)).
 
 > [!IMPORTANT]
 > **You must log in first.** `orders`, `basket`, and the MCP server require a
@@ -83,9 +84,10 @@ source .env                        # exports SALAMOONDER_API_KEY etc.
 ./intermarche-mcp mcp http :8080   # MCP server on :8080
 ```
 
-All API calls go through the Salamoonder solver, so `SALAMOONDER_API_KEY` is
-required. `login` uses the browser OAuth flow once and stores the tokens in the
-config dir; everything else runs headless.
+All API calls go through a captcha solver, so a provider key is required —
+`SALAMOONDER_API_KEY` (default) or `TWOCAPTCHA_API_KEY` (see
+[DataDome](#datadome)). `login` uses the browser OAuth flow once and stores the
+tokens in the config dir; everything else runs headless.
 
 ### B. Docker (plain CLI)
 
@@ -131,7 +133,7 @@ docker compose run --rm intermarche orders
 ```
 
 Set `IMT_CONFIG_DIR` in `.env` to reuse a host session; leave it empty for a
-self-contained named volume (then set `SALAMOONDER_PROXY`). Full details in
+self-contained named volume (then set `CAPTCHA_PROXY`). Full details in
 [`docker/README.md`](docker/README.md).
 
 ## Configuration
@@ -140,10 +142,12 @@ Configured entirely through environment variables (see [`.env.example`](.env.exa
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `SALAMOONDER_API_KEY` | solver | DataDome solver credit pool. Required. |
+| `CAPTCHA_PROVIDER` | solver | DataDome provider: `salamoonder` (default) or `2captcha`. |
+| `SALAMOONDER_API_KEY` | solver | Salamoonder credit pool. Required when `CAPTCHA_PROVIDER=salamoonder`. |
+| `TWOCAPTCHA_API_KEY` | solver | 2Captcha key. Required when `CAPTCHA_PROVIDER=2captcha` (also needs a proxy). |
 | `IMT_CONFIG_DIR` | compose | Host config dir to reuse inside the container (tokens + DataDome cookie). |
-| `SALAMOONDER_PROXY` | solver | Residential proxy for challenge fetch + API calls (self-contained container). |
-| `SALAMOONDER_MAX_SOLVES` | solver | Cap on paid solves per run (default 1). |
+| `CAPTCHA_PROXY` | solver | Residential proxy for challenge fetch + API calls, any provider (self-contained container). Aliases: `SALAMOONDER_PROXY`, `IMT_PROXY`. |
+| `CAPTCHA_MAX_SOLVES` | solver | Cap on paid solves per run (default 1). Alias: `SALAMOONDER_MAX_SOLVES`. |
 | `IMT_USER_AGENT` | solver | Override the Chrome User-Agent sent with requests. |
 
 State (OAuth tokens, selected store, cached DataDome cookie) lives in the config
@@ -152,15 +156,55 @@ on macOS, or `/data/intermarche-mcp` in the container.
 
 ## DataDome
 
-intermarche.com is protected by DataDome. Every API call is wrapped through the
-**Salamoonder solver**, which clears DataDome over the network (paid, capped by
-`SALAMOONDER_MAX_SOLVES`). The cleared cookie is cached on disk, so steady state
-costs zero credits.
+intermarche.com is protected by DataDome. Every API call is wrapped through a
+captcha **solver** that clears the challenge over the network (no browser).
+A solve is only ever triggered on an actual `403` and is **paid**, so the
+cleared cookie is cached on disk and the steady state costs zero credits
+(capped by `CAPTCHA_MAX_SOLVES`, default 1).
 
-DataDome binds clearance to the IP context of the challenge: a cookie minted
-*inside* a container can be rejected when the egress differs. Reuse a host
-session (`IMT_CONFIG_DIR`) or set a residential `SALAMOONDER_PROXY` — details in
+Two solver providers are supported, selected with `CAPTCHA_PROVIDER`:
+
+### Salamoonder (default)
+
+```env
+CAPTCHA_PROVIDER=salamoonder        # or just leave it unset
+SALAMOONDER_API_KEY=your-key        # https://salamoonder.com
+```
+
+Salamoonder runs the whole flow (challenge fetch **and** slider solve) on its
+own egress, so the minted DataDome `cid` and the solve already share one IP.
+A proxy is therefore **optional** — set `CAPTCHA_PROXY` only if you also want
+your own API calls to egress from that same IP (see *IP binding* below).
+
+### 2Captcha
+
+```env
+CAPTCHA_PROVIDER=2captcha
+TWOCAPTCHA_API_KEY=your-key         # https://2captcha.com
+CAPTCHA_PROXY=http://user:pass@host:port   # REQUIRED
+```
+
+With 2Captcha the steps are split: *we* fetch the challenge (minting the `cid`
+on our IP) while 2Captcha's workers solve the slider from their own IPs. For
+the returned cookie to be valid, both must share one IP — so a `CAPTCHA_PROXY`
+is **mandatory**: it is handed to 2Captcha so its workers replay the solve
+through the same egress that minted the `cid`. Without it the solver refuses to
+start. Prefer a residential FR proxy.
+
+### IP binding (both providers)
+
+DataDome binds the clearance to the IP context of the challenge, so the
+challenge fetch, the solve **and** the subsequent API calls should all egress
+from the same IP. `CAPTCHA_PROXY` (when set) is used for *both* the challenge
+fetch and every API call, keeping them aligned. A cookie minted *inside* a
+container can be rejected when the egress differs; reuse a host session
+(`IMT_CONFIG_DIR`) or set a residential `CAPTCHA_PROXY` — details in
 [`docker/README.md`](docker/README.md).
+
+| Provider | API key | Proxy (`CAPTCHA_PROXY`) |
+| --- | --- | --- |
+| `salamoonder` (default) | `SALAMOONDER_API_KEY` | optional |
+| `2captcha` | `TWOCAPTCHA_API_KEY` | **required** |
 
 Authentication uses the browser OAuth flow (`intermarche-mcp login`); the
 `desktop` Keycloak client forbids password (ROPC) login.

@@ -38,7 +38,7 @@ challenge-fetch path inside the container differs enough to break the binding
 (observed with OrbStack on macOS).
 
 So, for a self-contained container that mints its own cookie (no
-`IMT_CONFIG_DIR`), set `SALAMOONDER_PROXY` to a residential proxy
+`IMT_CONFIG_DIR`), set `CAPTCHA_PROXY` to a residential proxy
 (`http://user:pass@host:port`): it serves the challenge fetch *and* every API
 call, stabilising the IP context regardless of where the container runs.
 Reusing a host session (above) avoids this entirely.
@@ -53,6 +53,6 @@ token; only `orders` and `basket` do.
 
 ## Configuration
 
-All via `.env` (see `../.env.example`): `SALAMOONDER_API_KEY`,
-`SALAMOONDER_MAX_SOLVES`, `SALAMOONDER_PROXY`, `IMT_CONFIG_DIR` and
+All via `.env` (see `../.env.example`): `CAPTCHA_PROVIDER`, `SALAMOONDER_API_KEY`,
+`TWOCAPTCHA_API_KEY`, `CAPTCHA_MAX_SOLVES`, `CAPTCHA_PROXY`, `IMT_CONFIG_DIR` and
 `IMT_USER_AGENT`.

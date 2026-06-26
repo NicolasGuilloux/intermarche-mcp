@@ -12,9 +12,22 @@
 #   docker compose run --rm intermarche search "lait demi écrémé"
 set -e
 
-if [ -z "${SALAMOONDER_API_KEY}" ]; then
-    echo "WARN: SALAMOONDER_API_KEY is empty — the solver will error on the first DataDome 403." >&2
-fi
+CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-salamoonder}"
+case "${CAPTCHA_PROVIDER}" in
+    2captcha|twocaptcha)
+        if [ -z "${TWOCAPTCHA_API_KEY}" ]; then
+            echo "WARN: TWOCAPTCHA_API_KEY is empty — the solver will error on the first DataDome 403." >&2
+        fi
+        if [ -z "${CAPTCHA_PROXY}" ] && [ -z "${SALAMOONDER_PROXY}" ] && [ -z "${IMT_PROXY}" ]; then
+            echo "WARN: 2captcha requires a proxy (CAPTCHA_PROXY) — the solver will error on the first DataDome 403." >&2
+        fi
+        ;;
+    *)
+        if [ -z "${SALAMOONDER_API_KEY}" ]; then
+            echo "WARN: SALAMOONDER_API_KEY is empty — the solver will error on the first DataDome 403." >&2
+        fi
+        ;;
+esac
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 # Auth tokens are read from / written to the mounted /data volume, so logging in

@@ -8,9 +8,11 @@
 package solver
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,8 +21,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	salamoonder "github.com/salamoonder-llc/salamoonder-go"
 
 	"github.com/google/uuid"
 	"github.com/nover/intermarche-mcp/internal/config"
@@ -40,10 +40,10 @@ type cache struct {
 	Solved   string `json:"solved_at"` // RFC3339 timestamp of the last solve
 }
 
-// Transport implements http.RoundTripper using a Salamoonder-solved cookie.
+// Transport implements http.RoundTripper using a captcha-solver cookie.
 type Transport struct {
 	base      *http.Transport
-	apiKey    string
+	resolver  Resolver
 	userAgent string
 
 	proxy string // shared HTTP/S proxy for challenge fetch + API calls
@@ -59,7 +59,9 @@ type Transport struct {
 // the API calls, so the Datadome cid and its usage share one IP (required for
 // IP-locked Datadome configs like intermarche.com). Empty = direct.
 func proxyURL() string {
-	for _, k := range []string{"SALAMOONDER_PROXY", "IMT_PROXY"} {
+	// CAPTCHA_PROXY is the canonical name (applies to every provider). The
+	// SALAMOONDER_PROXY / IMT_PROXY names are kept as deprecated fallbacks.
+	for _, k := range []string{"CAPTCHA_PROXY", "SALAMOONDER_PROXY", "IMT_PROXY"} {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
 			return v
 		}
@@ -68,11 +70,14 @@ func proxyURL() string {
 }
 
 // maxSolvesPerRun caps paid solves in a single process run. Override with
-// SALAMOONDER_MAX_SOLVES. Keeps a broken-cookie retry loop from draining funds.
+// CAPTCHA_MAX_SOLVES (SALAMOONDER_MAX_SOLVES is a deprecated fallback). Keeps a
+// broken-cookie retry loop from draining funds.
 func maxSolvesPerRun() int {
-	if v := strings.TrimSpace(os.Getenv("SALAMOONDER_MAX_SOLVES")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return n
+	for _, k := range []string{"CAPTCHA_MAX_SOLVES", "SALAMOONDER_MAX_SOLVES"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				return n
+			}
 		}
 	}
 	return 1
@@ -82,11 +87,6 @@ func maxSolvesPerRun() int {
 // It does NOT solve anything yet (no cost): the first solve happens lazily on
 // the first 403 captcha.
 func New() (*Transport, error) {
-	apiKey := strings.TrimSpace(os.Getenv("SALAMOONDER_API_KEY"))
-	if apiKey == "" {
-		return nil, fmt.Errorf("solver: SALAMOONDER_API_KEY is not set")
-	}
-
 	ua := os.Getenv("IMT_USER_AGENT")
 	if ua == "" {
 		ua = defaultUA
@@ -110,9 +110,14 @@ func New() (*Transport, error) {
 		base.Proxy = http.ProxyURL(pu)
 	}
 
+	resolver, err := newResolver(resolverConfig{userAgent: ua, proxy: proxy})
+	if err != nil {
+		return nil, err
+	}
+
 	t := &Transport{
 		base:      base,
-		apiKey:    apiKey,
+		resolver:  resolver,
 		userAgent: ua,
 		proxy:     proxy,
 		cachePath: filepath.Join(dir, "datadome.json"),
@@ -135,7 +140,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !isDatadomeCaptcha(resp) {
+	_, isDD := datadomeCaptcha(resp)
+	if !isDD {
 		return resp, nil
 	}
 
@@ -146,11 +152,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	over := t.solveCount >= t.maxSolves
 	t.mu.Unlock()
 	if over {
-		return nil, fmt.Errorf("solver: Datadome 403 but solve cap reached (%d) — refusing to spend more credits this run; set SALAMOONDER_MAX_SOLVES to raise it", t.maxSolves)
+		return nil, fmt.Errorf("solver: Datadome 403 but solve cap reached (%d) — refusing to spend more credits this run; set CAPTCHA_MAX_SOLVES to raise it", t.maxSolves)
 	}
 
-	fmt.Fprintf(os.Stderr, "solver: Datadome 403 on %s — solving (this costs one Salamoonder credit)\n", req.URL.Path)
-	if err := t.solve(); err != nil {
+	fmt.Fprintf(os.Stderr, "solver: Datadome 403 on %s — solving with %s (this costs one credit)\n", req.URL.Path, t.resolver.Name())
+	if err := t.solve(req.URL.String()); err != nil {
 		return nil, err
 	}
 
@@ -202,51 +208,23 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
-// solve runs the full Salamoonder DataDome slider flow and caches the cookie.
-func (t *Transport) solve() error {
-	client, err := salamoonder.New(t.apiKey)
-	if err != nil {
-		return fmt.Errorf("solver: %w", err)
+// solve delegates the DataDome solve to the configured provider and caches the
+// returned cookie.
+//
+// challengeURL is the URL that just returned a Datadome 403 (the failing API
+// endpoint); the resolver fetches it so the freshly minted cid is bound to the
+// SAME egress that will solve the challenge.
+func (t *Transport) solve(challengeURL string) error {
+	if challengeURL == "" {
+		challengeURL = target
 	}
 
-	hdr := map[string]string{"User-Agent": t.userAgent}
-	// Fetch the challenge through the SAME proxy used for API calls so the
-	// minted Datadome cid is bound to that egress IP.
-	resp, err := client.Get(target, &salamoonder.RequestOptions{Headers: hdr, Proxy: t.proxy})
+	solved, err := t.resolver.Solve(challengeURL)
 	if err != nil {
-		return fmt.Errorf("solver: fetch challenge: %w", err)
+		return err
 	}
-	if resp.StatusCode == 200 && !strings.Contains(resp.Text, "var dd=") {
-		return fmt.Errorf("solver: no challenge present (status 200) — nothing to solve")
-	}
-
-	ddCookie := resp.Cookies.Get("datadome")
-	sliderURL, err := client.Datadome.ParseSliderURL(resp.Text, ddCookie, target)
-	if err != nil {
-		return fmt.Errorf("solver: parse slider URL: %w", err)
-	}
-
-	taskID, err := client.Task.CreateTask("DataDomeSliderSolver", map[string]interface{}{
-		"captcha_url":  sliderURL,
-		"user_agent":   t.userAgent,
-		"country_code": "fr",
-	})
-	if err != nil {
-		return fmt.Errorf("solver: create task: %w", err)
-	}
-
-	sol, err := client.Task.GetTaskResult(taskID, 2)
-	if err != nil {
-		return fmt.Errorf("solver: solve: %w", err)
-	}
-	solMap, _ := sol.(map[string]interface{})
-	cookieStr, _ := solMap["cookie"].(string)
-	if cookieStr == "" {
-		return fmt.Errorf("solver: solution had no cookie: %v", sol)
-	}
-	solved := cookieStr
-	if i := strings.Index(cookieStr, "datadome="); i >= 0 {
-		solved = strings.SplitN(cookieStr[i+len("datadome="):], ";", 2)[0]
+	if solved == "" {
+		return fmt.Errorf("solver: %s returned an empty cookie", t.resolver.Name())
 	}
 
 	t.mu.Lock()
@@ -286,8 +264,31 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-func isDatadomeCaptcha(resp *http.Response) bool {
-	return resp.StatusCode == http.StatusForbidden
+// datadomeCaptcha reports whether resp is a Datadome captcha block and, if so,
+// returns the captcha-delivery URL embedded in the JSON body (when present).
+// It only treats a 403 as a captcha when the body carries a captcha-delivery
+// URL or the x-datadome header is set, so genuine authorization 403s don't
+// burn a paid solve. The body is restored so a non-captcha response can still
+// be consumed by the caller.
+func datadomeCaptcha(resp *http.Response) (string, bool) {
+	if resp.StatusCode != http.StatusForbidden {
+		return "", false
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	if err != nil {
+		return "", resp.Header.Get("x-datadome") != ""
+	}
+
+	var body struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(b, &body) == nil && strings.Contains(body.URL, "captcha-delivery.com") {
+		return body.URL, true
+	}
+	return "", resp.Header.Get("x-datadome") != ""
 }
 
 func setIfAbsent(req *http.Request, key, val string) {

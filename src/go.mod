@@ -3,6 +3,7 @@ module github.com/nover/intermarche-mcp
 go 1.25.5
 
 require (
+	github.com/2captcha/2captcha-go v1.1.10
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/salamoonder-llc/salamoonder-go v0.0.0-20260320132749-5e39be1afc52

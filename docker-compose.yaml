@@ -10,8 +10,10 @@
 # Configuration comes from .env (see .env.example). At minimum:
 #   SALAMOONDER_API_KEY   — DataDome solver credit pool
 #   EMAIL / PASSWORD      — Intermarché account (browser-free ROPC login)
-# Optional: SALAMOONDER_PROXY — residential proxy if your egress IP is
-# penalised by DataDome (the host IP is used by default).
+# Optional: CAPTCHA_PROXY — residential proxy (http://user:pass@host:port) if
+# your egress IP is penalised by DataDome (the host IP is used by default).
+# Required for CAPTCHA_PROVIDER=2captcha, whose workers must replay the solve
+# from the same IP that minted the cid.
 
 services:
   intermarche:
@@ -31,7 +33,7 @@ services:
       #
       # Default (IMT_CONFIG_DIR unset): a self-contained named volume. The
       # container must mint its own DataDome cookie — reliable only with
-      # SALAMOONDER_PROXY set (a container's egress can break DataDome's
+      # CAPTCHA_PROXY set (a container's egress can break DataDome's
       # IP-binding; see docker/README.md).
       #
       # Recommended when running next to a configured host: point
