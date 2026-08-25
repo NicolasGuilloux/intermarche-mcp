@@ -50,12 +50,20 @@ browser anywhere at runtime.
   e.g. `http://user:pass@host:port` — used for both. A cookie minted from one IP
   context (e.g. inside a container) can be rejected when used from another; see
   `docker/README.md`.
-- **Single-use proxy:** instead of a standing proxy, set
-  `CAPTCHA_PROXY_LISTEN` + `CAPTCHA_PROXY_ADVERTISE` and `internal/solver/microproxy`
+- **Single-use proxy:** instead of a standing proxy, `internal/solver/microproxy`
   serves a CONNECT proxy for the length of one solve — fresh credentials per
-  solve, domain allow list, listener destroyed on return. Exposing the port to
-  2Captcha's workers is left to the operator. Mutually exclusive with
-  `CAPTCHA_PROXY`.
+  solve, domain allow list (incl. `ident.me`/`tnedi.me`, which the workers use to
+  check the IP they were given), listener destroyed on return. Mutually
+  exclusive with `CAPTCHA_PROXY`. Two ways to expose it, via
+  `CAPTCHA_PROXY_ADVERTISE`:
+  - `ngrok` — `internal/solver/ngroktunnel.go` opens a TCP tunnel through the
+    ngrok Go SDK when the solve starts and closes it with the proxy
+    (`NGROK_AUTHTOKEN` only; no binary, works in the container). Careful: the
+    context passed to `agent.Listen` owns the endpoint's lifetime, so cancelling
+    it kills the public address — it is cancelled in `Close`, and setup is
+    bounded separately.
+  - `host:port` (or `ngrok:<agent-api>`) with `CAPTCHA_PROXY_LISTEN` — the
+    operator exposes the port.
 
 All API calls are proxied through `/api/service{path}` on `www.intermarche.com`. The actual backend microservices live behind this proxy:
 - `/panier/v1/stores/{storeId}/carts` — cart operations (sync-based: full state + events)

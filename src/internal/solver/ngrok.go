@@ -9,26 +9,25 @@ import (
 	"time"
 )
 
-// ngrokScheme is the CAPTCHA_PROXY_ADVERTISE value asking for the public
-// address to be read from a running ngrok agent instead of being hardcoded.
-// "ngrok" uses the agent's default API; "ngrok:<url>" points at another one.
+// ngrokScheme is the CAPTCHA_PROXY_ADVERTISE value asking this process to open
+// the tunnel itself, for the length of one solve (see ngroktunnel.go).
+// "ngrok:<url>" instead reads the address from an agent someone else runs.
 const ngrokScheme = "ngrok"
 
 const defaultNgrokAPI = "http://127.0.0.1:4040"
 
-// ngrokAPI returns the agent API to query, and whether the advertise value
-// asked for ngrok resolution at all.
+// ngrokAPI returns the API of the externally-run agent to query, and whether
+// the advertise value asked for one. A bare "ngrok" does not: that means the
+// tunnel is opened here instead.
 func ngrokAPI(advertise string) (string, bool) {
-	advertise = strings.TrimSpace(advertise)
-	if advertise == ngrokScheme {
+	api, ok := strings.CutPrefix(strings.TrimSpace(advertise), ngrokScheme+":")
+	if !ok {
+		return "", false
+	}
+	if api = strings.TrimSpace(api); api == "" {
 		return defaultNgrokAPI, true
 	}
-	if api, ok := strings.CutPrefix(advertise, ngrokScheme+":"); ok {
-		if api = strings.TrimSpace(api); api != "" {
-			return api, true
-		}
-	}
-	return "", false
+	return api, true
 }
 
 // ngrokEndpoint asks a running ngrok agent for the public host:port of the TCP

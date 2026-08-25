@@ -15,11 +15,14 @@ set -e
 if [ -z "${TWOCAPTCHA_API_KEY}" ]; then
     echo "WARN: TWOCAPTCHA_API_KEY is empty — the solver will error on the first DataDome 403." >&2
 fi
-if [ -z "${CAPTCHA_PROXY}" ] && [ -z "${IMT_PROXY}" ] && [ -z "${CAPTCHA_PROXY_LISTEN}" ]; then
-    echo "WARN: 2captcha requires a proxy — set CAPTCHA_PROXY, or CAPTCHA_PROXY_LISTEN + CAPTCHA_PROXY_ADVERTISE for a single-use one — the solver will error on the first DataDome 403." >&2
+if [ -z "${CAPTCHA_PROXY}" ] && [ -z "${IMT_PROXY}" ] && [ -z "${CAPTCHA_PROXY_ADVERTISE}" ]; then
+    echo "WARN: 2captcha requires a proxy — set CAPTCHA_PROXY, or CAPTCHA_PROXY_ADVERTISE for a single-use one — the solver will error on the first DataDome 403." >&2
 fi
 if [ -n "${CAPTCHA_PROXY_LISTEN}" ] && [ -z "${CAPTCHA_PROXY_ADVERTISE}" ]; then
     echo "WARN: CAPTCHA_PROXY_LISTEN is set without CAPTCHA_PROXY_ADVERTISE — the solver will refuse to start." >&2
+fi
+if [ "${CAPTCHA_PROXY_ADVERTISE}" = "ngrok" ] && [ -z "${NGROK_AUTHTOKEN}" ]; then
+    echo "WARN: CAPTCHA_PROXY_ADVERTISE=ngrok needs NGROK_AUTHTOKEN — no tunnel can be opened on the first DataDome 403." >&2
 fi
 
 # ── Authentication ─────────────────────────────────────────────────────────────

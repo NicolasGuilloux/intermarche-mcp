@@ -56,8 +56,13 @@ var defaultPorts = []string{"80", "443"}
 
 // Config describes one ephemeral proxy.
 type Config struct {
-	// Listen is the local bind address, e.g. "0.0.0.0:18888".
+	// Listen is the local bind address, e.g. "0.0.0.0:18888". Ignored when
+	// Listener is set.
 	Listen string
+	// Listener, when set, is served as-is instead of binding Listen — an ngrok
+	// endpoint, say, which is already reachable from the internet. Close takes
+	// it down with the rest.
+	Listener net.Listener
 	// Advertise is the public "host:port" handed to the captcha service. It is
 	// never dialled locally — the caller is responsible for routing it to
 	// Listen.
@@ -95,7 +100,7 @@ type Proxy struct {
 
 // Start binds the listener and mints one-shot credentials for it.
 func Start(cfg Config) (*Proxy, error) {
-	if strings.TrimSpace(cfg.Listen) == "" {
+	if cfg.Listener == nil && strings.TrimSpace(cfg.Listen) == "" {
 		return nil, fmt.Errorf("microproxy: no listen address")
 	}
 	if strings.TrimSpace(cfg.Advertise) == "" {
@@ -125,9 +130,13 @@ func Start(cfg Config) (*Proxy, error) {
 		return nil, err
 	}
 
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		return nil, fmt.Errorf("microproxy: listen on %s: %w", cfg.Listen, err)
+	ln := cfg.Listener
+	if ln == nil {
+		bound, err := net.Listen("tcp", cfg.Listen)
+		if err != nil {
+			return nil, fmt.Errorf("microproxy: listen on %s: %w", cfg.Listen, err)
+		}
+		ln = bound
 	}
 
 	p := &Proxy{

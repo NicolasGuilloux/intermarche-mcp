@@ -143,11 +143,11 @@ Configured entirely through environment variables (see [`.env.example`](.env.exa
 | `TWOCAPTCHA_API_KEY` | solver | 2Captcha credit pool. Required (and so is a proxy). |
 | `IMT_CONFIG_DIR` | compose | Host config dir to reuse inside the container (tokens + DataDome cookie). |
 | `CAPTCHA_PROXY` | solver | Standing proxy for challenge fetch + API calls, also handed to 2Captcha's workers. Alias: `IMT_PROXY`. |
-| `CAPTCHA_PROXY_LISTEN` | solver | Local bind address of the single-use proxy served during a solve. Excludes `CAPTCHA_PROXY`. |
-| `CAPTCHA_PROXY_ADVERTISE` | solver | Public `host:port` reaching that listener — what 2Captcha is told to use. `ngrok` reads it from a running agent instead. |
+| `CAPTCHA_PROXY_LISTEN` | solver | Local bind address of the single-use proxy. Not needed with `CAPTCHA_PROXY_ADVERTISE=ngrok`. Excludes `CAPTCHA_PROXY`. |
+| `CAPTCHA_PROXY_ADVERTISE` | solver | Public `host:port` reaching that listener. `ngrok` opens a tunnel per solve instead; `ngrok:<agent-api>` reads one from a running agent. |
 | `CAPTCHA_PROXY_ALLOW` | solver | Domains the single-use proxy may tunnel to (default `intermarche.com,captcha-delivery.com,ident.me,tnedi.me`). |
-| `NGROK_AUTHTOKEN` | ngrok agent | Credential for `ngrok tcp`, read by ngrok itself. Only needed with `CAPTCHA_PROXY_ADVERTISE=ngrok`. |
-| `NGROK_REGION` | ngrok agent | Edge region for the tunnel: `us` (default), `eu`, `ap`, `au`, `sa`, `jp`, `in`. |
+| `NGROK_AUTHTOKEN` | solver / ngrok agent | ngrok credential. Required when `CAPTCHA_PROXY_ADVERTISE=ngrok`, which opens the tunnel per solve. |
+| `NGROK_REGION` | ngrok agent | Edge region, for an externally-run agent only: `us` (default), `eu`, `ap`, `au`, `sa`, `jp`, `in`. |
 | `CAPTCHA_MAX_SOLVES` | solver | Cap on paid solves per run (default 1). |
 | `IMT_USER_AGENT` | solver | Override the Chrome User-Agent sent with requests. |
 
@@ -205,7 +205,7 @@ sequenceDiagram
     CLI->>DD: fetch the challenge — mints the cid on this host's IP
     DD-->>CLI: slider URL
 
-    CLI->>NG: read the tunnel address from the local agent
+    CLI->>NG: open a TCP tunnel — the listener is the public address
     CLI->>MP: start — credentials generated for this solve only
     CLI->>TC: createTask: slider URL, UA, tunnel address + credentials
 
@@ -216,6 +216,7 @@ sequenceDiagram
     TC-->>CLI: cleared datadome cookie
 
     CLI->>MP: close — listener and credentials destroyed
+    CLI->>NG: close — the public address is gone
     CLI->>DD: retry with the cookie
     DD-->>CLI: 200
 ```
@@ -247,26 +248,40 @@ allowed domain cannot be pointed back at your network. Every refusal is logged
 with its source IP.
 
 Routing the public address to the listener is **your** job — port forward,
-tunnel, firewall rule. With ngrok, whose address changes on every restart, set
-`CAPTCHA_PROXY_ADVERTISE=ngrok` and it is read from the agent
-(`127.0.0.1:4040`) at each solve:
+tunnel, firewall rule — *unless* you set `CAPTCHA_PROXY_ADVERTISE=ngrok`, in
+which case this process opens the tunnel itself when the solve starts and
+closes it with the proxy. Nothing has to be running beforehand and no port has
+to be bound, so `CAPTCHA_PROXY_LISTEN` becomes unnecessary:
 
-```bash
-set -a; . ./.env; set +a   # exports NGROK_AUTHTOKEN, among others
-ngrok tcp 18888            # then CAPTCHA_PROXY_ADVERTISE=ngrok
+```env
+TWOCAPTCHA_API_KEY=your-key
+CAPTCHA_PROXY_ADVERTISE=ngrok
+NGROK_AUTHTOKEN=your-token          # dashboard.ngrok.com/get-started/your-authtoken
 ```
 
-`NGROK_AUTHTOKEN` and `NGROK_REGION` are read by the ngrok agent itself, so
-keeping them in `.env` avoids a machine-wide `ngrok.yml` and travels with the
-rest of the config. The region only changes tunnel latency: the solve still
-egresses from this host, which is the IP DataDome binds the clearance to.
+A solve then reads:
+
+```
+solver: ngrok tunnel opened on 2.tcp.eu.ngrok.io:14907
+solver: single-use proxy listening on 2.tcp.eu.ngrok.io:14907, advertised to 2captcha as 2.tcp.eu.ngrok.io:14907
+solver: single-use proxy closed (7 tunnel(s), 18 request(s) refused)
+solver: ngrok tunnel closed
+```
+
+`NGROK_AUTHTOKEN` is the only thing needed — the ngrok binary is not, since the
+tunnel is opened through the Go SDK, which also works inside the container.
+To use an agent you run yourself instead, set
+`CAPTCHA_PROXY_ADVERTISE=ngrok:http://127.0.0.1:4040` along with
+`CAPTCHA_PROXY_LISTEN`, and its address is read at each solve. `NGROK_REGION`
+only applies to that externally-run agent; the embedded tunnel takes the region
+from the account.
 
 Note that an ngrok endpoint is public and cannot be restricted by source IP on
 the free plan, so the single-use credentials and the domain allow list are all
-that stand in front of it — and every connection reaches the proxy from the
-agent's loopback, so the refusal logs no longer show the caller's real IP. Note that 2Captcha's workers can only speak plaintext
-`CONNECT`, so this port cannot be wrapped in TLS: keep it firewalled to
-2Captcha's egress (`138.201.188.166`, per their docs) if you can.
+that stand in front of it. And whichever way the port is exposed, 2Captcha's
+workers only speak plaintext `CONNECT`, so it cannot be wrapped in TLS — keep
+it firewalled to 2Captcha's egress (`138.201.188.166`, per their docs) when the
+exposure is yours to control.
 
 `CAPTCHA_PROXY_LISTEN` and `CAPTCHA_PROXY` are mutually exclusive: with the
 single-use proxy the API calls egress **directly**, so that both legs share

@@ -70,17 +70,22 @@ func proxyURL() string {
 }
 
 // ephemeralProxy reads the settings of the single-use proxy served to the
-// captcha provider for the duration of a solve. Enabled by CAPTCHA_PROXY_LISTEN
-// (the local bind address); CAPTCHA_PROXY_ADVERTISE is the public host:port
-// that reaches it, which the caller is responsible for routing. Nil = disabled.
+// captcha provider for the duration of a solve. CAPTCHA_PROXY_LISTEN is the
+// local bind address and CAPTCHA_PROXY_ADVERTISE the public host:port that
+// reaches it, which the caller is responsible for routing — unless it is
+// "ngrok", in which case the tunnel is opened per solve and needs no bind
+// address at all. Nil = disabled.
 func ephemeralProxy() (*microproxy.Config, error) {
 	listen := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_LISTEN"))
-	if listen == "" {
+	advertise := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_ADVERTISE"))
+	if listen == "" && advertise == "" {
 		return nil, nil
 	}
-	advertise := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_ADVERTISE"))
 	if advertise == "" {
-		return nil, fmt.Errorf("solver: CAPTCHA_PROXY_LISTEN is set but CAPTCHA_PROXY_ADVERTISE is empty — the solver needs the public host:port that reaches %s", listen)
+		return nil, fmt.Errorf("solver: CAPTCHA_PROXY_LISTEN is set but CAPTCHA_PROXY_ADVERTISE is empty — the solver needs the public host:port that reaches %s, or %q to open a tunnel itself", listen, ngrokScheme)
+	}
+	if listen == "" && advertise != ngrokScheme {
+		return nil, fmt.Errorf("solver: CAPTCHA_PROXY_ADVERTISE=%q needs CAPTCHA_PROXY_LISTEN — only %q brings its own listener", advertise, ngrokScheme)
 	}
 	cfg := &microproxy.Config{Listen: listen, Advertise: advertise}
 	// CAPTCHA_PROXY_ALLOW overrides the domains the tunnel may reach.

@@ -13,8 +13,8 @@
 # Required: CAPTCHA_PROXY — proxy (http://user:pass@host:port) whose IP is
 # shared by the API calls and by 2Captcha's workers, which must replay the
 # solve from the same IP that minted the cid — or, instead of a standing proxy,
-# CAPTCHA_PROXY_LISTEN + CAPTCHA_PROXY_ADVERTISE to serve a single-use one
-# (publish that port below so 2Captcha's workers can reach it).
+# CAPTCHA_PROXY_ADVERTISE=ngrok (+ NGROK_AUTHTOKEN) to serve a single-use one
+# behind a tunnel opened per solve — nothing to publish.
 
 services:
   intermarche:
@@ -29,8 +29,10 @@ services:
       MCP_ADDR: ":8080"
     ports:
       - "8080:8080"            # MCP Streamable HTTP
-      # Single-use captcha proxy: publish it only when CAPTCHA_PROXY_LISTEN is
-      # set, and make sure CAPTCHA_PROXY_ADVERTISE resolves to this port.
+      # Single-use captcha proxy: only needed when you expose the port
+      # yourself (CAPTCHA_PROXY_LISTEN + a public CAPTCHA_PROXY_ADVERTISE).
+      # With CAPTCHA_PROXY_ADVERTISE=ngrok the tunnel is opened from inside the
+      # container per solve, so nothing has to be published.
       # - "18888:18888"
     volumes:
       # Holds tokens, selected store and the cached DataDome cookie.

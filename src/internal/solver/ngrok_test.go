@@ -75,7 +75,9 @@ func TestNgrokAPISelection(t *testing.T) {
 		api string
 		ok  bool
 	}{
-		"ngrok":                       {defaultNgrokAPI, true},
+		// A bare "ngrok" opens the tunnel here, so there is no agent to query.
+		"ngrok":                       {"", false},
+		"ngrok:":                      {defaultNgrokAPI, true},
 		"ngrok:http://127.0.0.1:4041": {"http://127.0.0.1:4041", true},
 		"203.0.113.7:18888":           {"", false},
 		"":                            {"", false},

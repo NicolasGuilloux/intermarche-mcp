@@ -81,37 +81,24 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 		return "", err
 	}
 
-	proxyType, proxyAuth, served, perr := r.workerProxy()
-	if perr != nil {
-		return "", perr
+	access, aerr := r.workerAccess()
+	if aerr != nil {
+		return "", aerr
 	}
-	if served != nil {
-		defer func() {
-			tunnels, rejected := served.Stats()
-			_ = served.Close()
-			fmt.Fprintf(os.Stderr, "solver: single-use proxy closed (%d tunnel(s), %d request(s) refused)\n", tunnels, rejected)
-		}()
-	}
+	defer access.close()
 
 	client := api2captcha.NewClient(r.apiKey)
 	dd := api2captcha.DataDome{
 		Url:        challengeURL,
 		CaptchaUrl: captchaURL,
 		UserAgent:  r.userAgent,
-		Proxytype:  proxyType,
-		Proxy:      proxyAuth,
+		Proxytype:  access.proxyType,
+		Proxy:      access.auth,
 	}
 
 	code, _, err := client.Solve(dd.ToRequest())
 	if err != nil {
-		// A single-use proxy that saw no tunnel at all means the workers never
-		// got in — a routing problem, not a solving one.
-		if served != nil {
-			if tunnels, _ := served.Stats(); tunnels == 0 {
-				return "", fmt.Errorf("solver: 2captcha never connected to the single-use proxy advertised as %s — check that address is reachable from the internet and forwards to %s: %w", served.Endpoint(), served.Addr(), err)
-			}
-		}
-		return "", fmt.Errorf("solver: 2captcha could not solve intermarche's Datadome challenge: %w — check the proxy is residential/FR and matches the challenge IP", err)
+		return "", access.explain(err)
 	}
 	if code == "" {
 		return "", fmt.Errorf("solver: 2captcha returned an empty cookie")
@@ -119,36 +106,92 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 	return stripDatadome(code), nil
 }
 
-// workerProxy returns the (type, auth) pair 2Captcha's workers should use to
-// reach intermarche.com. With CAPTCHA_PROXY_LISTEN it stands up a single-use
-// proxy — fresh credentials, a domain allow list, a listener that dies with the
-// solve — and returns it so the caller can close it and read what it saw.
-// The returned proxy is nil when a standing CAPTCHA_PROXY is used instead.
-func (r *twoCaptchaResolver) workerProxy() (proxyType, auth string, served *microproxy.Proxy, err error) {
+// workerAccess is how 2Captcha's workers reach intermarche.com for one solve:
+// a standing proxy, or a single-use one — itself optionally behind an ngrok
+// tunnel opened for that solve alone.
+type workerAccess struct {
+	proxyType string
+	auth      string
+	proxy     *microproxy.Proxy // nil when a standing CAPTCHA_PROXY is used
+	tunnel    *ngrokTunnel      // nil unless the tunnel is managed here
+}
+
+// close destroys everything that was stood up for the solve, in the order that
+// stops new connections first.
+func (w *workerAccess) close() {
+	if w.proxy != nil {
+		tunnels, rejected := w.proxy.Stats()
+		_ = w.proxy.Close()
+		fmt.Fprintf(os.Stderr, "solver: single-use proxy closed (%d tunnel(s), %d request(s) refused)\n", tunnels, rejected)
+	}
+	if w.tunnel != nil {
+		w.tunnel.Close()
+		fmt.Fprintln(os.Stderr, "solver: ngrok tunnel closed")
+	}
+}
+
+// explain turns a failed solve into the most useful message available: a
+// single-use proxy that saw no tunnel at all means the workers never got in,
+// which is a reachability problem rather than a solving one.
+func (w *workerAccess) explain(err error) error {
+	if w.proxy != nil {
+		if tunnels, _ := w.proxy.Stats(); tunnels == 0 {
+			if w.tunnel != nil {
+				return fmt.Errorf("solver: the ngrok tunnel %s was open but no 2captcha worker came through it: %w", w.proxy.Endpoint(), err)
+			}
+			return fmt.Errorf("solver: 2captcha never connected to the single-use proxy advertised as %s — check that address is reachable from the internet and forwards to %s: %w", w.proxy.Endpoint(), w.proxy.Addr(), err)
+		}
+	}
+	return fmt.Errorf("solver: 2captcha could not solve intermarche's Datadome challenge: %w — check the proxy is residential/FR and matches the challenge IP", err)
+}
+
+// workerAccess prepares that access. With CAPTCHA_PROXY_LISTEN it stands up a
+// single-use proxy: fresh credentials, a domain allow list, and a listener that
+// dies with the solve. With CAPTCHA_PROXY_ADVERTISE=ngrok it also opens the
+// tunnel that lets the workers in, and closes it on the way out.
+func (r *twoCaptchaResolver) workerAccess() (*workerAccess, error) {
 	if r.ephemeral == nil {
-		proxyType, auth, err = splitProxy(r.proxy)
-		return proxyType, auth, nil, err
+		proxyType, auth, err := splitProxy(r.proxy)
+		if err != nil {
+			return nil, err
+		}
+		return &workerAccess{proxyType: proxyType, auth: auth}, nil
 	}
 
 	cfg := *r.ephemeral
-	// The advertised address may be resolved fresh for every solve: an ngrok
-	// tunnel hands out a new random address each time the agent restarts.
-	if api, ok := ngrokAPI(cfg.Advertise); ok {
+	access := &workerAccess{proxyType: "HTTP"}
+
+	switch api, external := ngrokAPI(cfg.Advertise); {
+	case cfg.Advertise == ngrokScheme:
+		// The tunnel is the listener: nothing to bind, nothing to forward.
+		tunnel, err := startNgrokTunnel()
+		if err != nil {
+			return nil, err
+		}
+		access.tunnel = tunnel
+		cfg.Listener = tunnel.listener
+		cfg.Advertise = tunnel.endpoint
+		fmt.Fprintf(os.Stderr, "solver: ngrok tunnel opened on %s\n", tunnel.endpoint)
+	case external:
+		// An agent someone else runs: its address changes on every restart, so
+		// it is resolved fresh for each solve.
 		endpoint, err := ngrokEndpoint(api, cfg.Listen)
 		if err != nil {
-			return "", "", nil, err
+			return nil, err
 		}
 		cfg.Advertise = endpoint
 	}
 
 	p, err := microproxy.Start(cfg)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("solver: %w", err)
+		access.close()
+		return nil, fmt.Errorf("solver: %w", err)
 	}
 	login, password := p.Credentials()
+	access.proxy = p
+	access.auth = login + ":" + password + "@" + p.Endpoint()
 	fmt.Fprintf(os.Stderr, "solver: single-use proxy listening on %s, advertised to 2captcha as %s\n", p.Addr(), p.Endpoint())
-
-	return "HTTP", login + ":" + password + "@" + p.Endpoint(), p, nil
+	return access, nil
 }
 
 // fetchCaptchaURL fetches the challenge from the egress the workers will use

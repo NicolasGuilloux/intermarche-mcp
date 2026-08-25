@@ -54,5 +54,7 @@ token; only `orders` and `basket` do.
 ## Configuration
 
 All via `.env` (see `../.env.example`): `TWOCAPTCHA_API_KEY`,
-`CAPTCHA_MAX_SOLVES`, `CAPTCHA_PROXY` (or `CAPTCHA_PROXY_LISTEN` +
-`CAPTCHA_PROXY_ADVERTISE`), `IMT_CONFIG_DIR` and `IMT_USER_AGENT`.
+`CAPTCHA_MAX_SOLVES`, `CAPTCHA_PROXY` (or `CAPTCHA_PROXY_ADVERTISE=ngrok` plus
+`NGROK_AUTHTOKEN`, which needs no ngrok binary and nothing published — the
+tunnel is opened from inside the container for the length of a solve),
+`IMT_CONFIG_DIR` and `IMT_USER_AGENT`.
