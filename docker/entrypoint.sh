@@ -1,5 +1,5 @@
 #!/bin/sh
-# Browser-free entrypoint for the Salamoonder ("solver") transport.
+# Browser-free entrypoint for the captcha ("solver") transport.
 #
 # Boot sequence:
 #   1. sanity-check the solver credential,
@@ -12,22 +12,15 @@
 #   docker compose run --rm intermarche search "lait demi écrémé"
 set -e
 
-CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-salamoonder}"
-case "${CAPTCHA_PROVIDER}" in
-    2captcha|twocaptcha)
-        if [ -z "${TWOCAPTCHA_API_KEY}" ]; then
-            echo "WARN: TWOCAPTCHA_API_KEY is empty — the solver will error on the first DataDome 403." >&2
-        fi
-        if [ -z "${CAPTCHA_PROXY}" ] && [ -z "${SALAMOONDER_PROXY}" ] && [ -z "${IMT_PROXY}" ]; then
-            echo "WARN: 2captcha requires a proxy (CAPTCHA_PROXY) — the solver will error on the first DataDome 403." >&2
-        fi
-        ;;
-    *)
-        if [ -z "${SALAMOONDER_API_KEY}" ]; then
-            echo "WARN: SALAMOONDER_API_KEY is empty — the solver will error on the first DataDome 403." >&2
-        fi
-        ;;
-esac
+if [ -z "${TWOCAPTCHA_API_KEY}" ]; then
+    echo "WARN: TWOCAPTCHA_API_KEY is empty — the solver will error on the first DataDome 403." >&2
+fi
+if [ -z "${CAPTCHA_PROXY}" ] && [ -z "${IMT_PROXY}" ] && [ -z "${CAPTCHA_PROXY_LISTEN}" ]; then
+    echo "WARN: 2captcha requires a proxy — set CAPTCHA_PROXY, or CAPTCHA_PROXY_LISTEN + CAPTCHA_PROXY_ADVERTISE for a single-use one — the solver will error on the first DataDome 403." >&2
+fi
+if [ -n "${CAPTCHA_PROXY_LISTEN}" ] && [ -z "${CAPTCHA_PROXY_ADVERTISE}" ]; then
+    echo "WARN: CAPTCHA_PROXY_LISTEN is set without CAPTCHA_PROXY_ADVERTISE — the solver will refuse to start." >&2
+fi
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 # Auth tokens are read from / written to the mounted /data volume, so logging in

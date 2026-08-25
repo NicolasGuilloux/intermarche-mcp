@@ -12,19 +12,30 @@ import (
 	"time"
 
 	api2captcha "github.com/2captcha/2captcha-go"
+	"github.com/nover/intermarche-mcp/internal/solver/microproxy"
 )
 
 // twoCaptchaResolver solves Datadome through the 2Captcha service
 // (https://2captcha.com).
 //
-// Unlike Salamoonder, 2Captcha has no proxied "fetch the challenge" helper, so
-// we fetch the challenge ourselves through the SAME proxy we hand to 2Captcha:
-// DataDome binds the minted cid to that egress IP and 2Captcha's workers must
-// replay the solve from it, so a proxy is required for this provider.
+// 2Captcha has no proxied "fetch the challenge" helper, so the challenge is
+// fetched from the SAME egress the workers will use: DataDome
+// binds the minted cid to that IP and 2Captcha's workers must replay the solve
+// from it, so this provider always needs a proxy. Two shapes are supported:
+//
+//   - CAPTCHA_PROXY: a standing proxy, used for the challenge fetch and handed
+//     to the workers.
+//   - CAPTCHA_PROXY_LISTEN/_ADVERTISE: a single-use proxy served by this
+//     process for the length of the solve (see internal/solver/microproxy).
+//     The challenge is then fetched directly, since both legs egress from this
+//     host.
 type twoCaptchaResolver struct {
 	apiKey    string
 	userAgent string
 	proxy     string
+	// ephemeral, when set, replaces the standing proxy: a single-use one is
+	// served for the length of a solve and torn down straight after.
+	ephemeral *microproxy.Config
 
 	http *http.Client
 }
@@ -34,24 +45,30 @@ func newTwoCaptchaResolver(cfg resolverConfig) (Resolver, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("solver: TWOCAPTCHA_API_KEY is not set")
 	}
-	if cfg.proxy == "" {
-		return nil, fmt.Errorf("solver: 2captcha requires a proxy so the challenge cid and the solve share one IP — set CAPTCHA_PROXY")
+	if cfg.proxy == "" && cfg.ephemeral == nil {
+		return nil, fmt.Errorf("solver: 2captcha requires a proxy so the challenge cid and the solve share one IP — set CAPTCHA_PROXY, or CAPTCHA_PROXY_LISTEN + CAPTCHA_PROXY_ADVERTISE to serve a single-use one")
 	}
 
 	tr := &http.Transport{
 		ForceAttemptHTTP2: false,
 		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
-	pu, err := url.Parse(cfg.proxy)
-	if err != nil {
-		return nil, fmt.Errorf("solver: invalid proxy URL %q: %w", cfg.proxy, err)
+	// With an ephemeral proxy the workers egress from this host, so the
+	// challenge is fetched directly — same IP, which is what Datadome binds
+	// the cid to.
+	if cfg.proxy != "" {
+		pu, err := url.Parse(cfg.proxy)
+		if err != nil {
+			return nil, fmt.Errorf("solver: invalid proxy URL %q: %w", cfg.proxy, err)
+		}
+		tr.Proxy = http.ProxyURL(pu)
 	}
-	tr.Proxy = http.ProxyURL(pu)
 
 	return &twoCaptchaResolver{
 		apiKey:    apiKey,
 		userAgent: cfg.userAgent,
 		proxy:     cfg.proxy,
+		ephemeral: cfg.ephemeral,
 		http:      &http.Client{Transport: tr, Timeout: 30 * time.Second},
 	}, nil
 }
@@ -64,9 +81,16 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 		return "", err
 	}
 
-	proxyType, proxyAuth, perr := splitProxy(r.proxy)
+	proxyType, proxyAuth, served, perr := r.workerProxy()
 	if perr != nil {
 		return "", perr
+	}
+	if served != nil {
+		defer func() {
+			tunnels, rejected := served.Stats()
+			_ = served.Close()
+			fmt.Fprintf(os.Stderr, "solver: single-use proxy closed (%d tunnel(s), %d request(s) refused)\n", tunnels, rejected)
+		}()
 	}
 
 	client := api2captcha.NewClient(r.apiKey)
@@ -80,7 +104,14 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 
 	code, _, err := client.Solve(dd.ToRequest())
 	if err != nil {
-		return "", fmt.Errorf("solver: 2captcha could not solve intermarche's Datadome challenge: %w — check the proxy is residential/FR and matches the challenge IP, or switch provider (CAPTCHA_PROVIDER=salamoonder)", err)
+		// A single-use proxy that saw no tunnel at all means the workers never
+		// got in — a routing problem, not a solving one.
+		if served != nil {
+			if tunnels, _ := served.Stats(); tunnels == 0 {
+				return "", fmt.Errorf("solver: 2captcha never connected to the single-use proxy advertised as %s — check that address is reachable from the internet and forwards to %s: %w", served.Endpoint(), served.Addr(), err)
+			}
+		}
+		return "", fmt.Errorf("solver: 2captcha could not solve intermarche's Datadome challenge: %w — check the proxy is residential/FR and matches the challenge IP", err)
 	}
 	if code == "" {
 		return "", fmt.Errorf("solver: 2captcha returned an empty cookie")
@@ -88,8 +119,41 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 	return stripDatadome(code), nil
 }
 
-// fetchCaptchaURL fetches the challenge through the proxy and extracts the
-// geo.captcha-delivery.com captcha URL 2Captcha needs.
+// workerProxy returns the (type, auth) pair 2Captcha's workers should use to
+// reach intermarche.com. With CAPTCHA_PROXY_LISTEN it stands up a single-use
+// proxy — fresh credentials, a domain allow list, a listener that dies with the
+// solve — and returns it so the caller can close it and read what it saw.
+// The returned proxy is nil when a standing CAPTCHA_PROXY is used instead.
+func (r *twoCaptchaResolver) workerProxy() (proxyType, auth string, served *microproxy.Proxy, err error) {
+	if r.ephemeral == nil {
+		proxyType, auth, err = splitProxy(r.proxy)
+		return proxyType, auth, nil, err
+	}
+
+	cfg := *r.ephemeral
+	// The advertised address may be resolved fresh for every solve: an ngrok
+	// tunnel hands out a new random address each time the agent restarts.
+	if api, ok := ngrokAPI(cfg.Advertise); ok {
+		endpoint, err := ngrokEndpoint(api, cfg.Listen)
+		if err != nil {
+			return "", "", nil, err
+		}
+		cfg.Advertise = endpoint
+	}
+
+	p, err := microproxy.Start(cfg)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("solver: %w", err)
+	}
+	login, password := p.Credentials()
+	fmt.Fprintf(os.Stderr, "solver: single-use proxy listening on %s, advertised to 2captcha as %s\n", p.Addr(), p.Endpoint())
+
+	return "HTTP", login + ":" + password + "@" + p.Endpoint(), p, nil
+}
+
+// fetchCaptchaURL fetches the challenge from the egress the workers will use
+// (the standing proxy, or this host when the proxy is ephemeral) and extracts
+// the geo.captcha-delivery.com captcha URL 2Captcha needs.
 func (r *twoCaptchaResolver) fetchCaptchaURL(challengeURL string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, challengeURL, nil)
 	if err != nil {

@@ -1,5 +1,5 @@
 // Package solver provides a browser-free http.RoundTripper that obtains a
-// cleared Datadome cookie through the Salamoonder captcha-solving service.
+// cleared Datadome cookie through a captcha-solving service.
 //
 // Cost control is the priority: a paid solve is only ever triggered when an
 // API call actually returns a 403 Datadome captcha AND no cached cookie works.
@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nover/intermarche-mcp/internal/config"
+	"github.com/nover/intermarche-mcp/internal/solver/microproxy"
 )
 
 const (
@@ -59,9 +60,8 @@ type Transport struct {
 // the API calls, so the Datadome cid and its usage share one IP (required for
 // IP-locked Datadome configs like intermarche.com). Empty = direct.
 func proxyURL() string {
-	// CAPTCHA_PROXY is the canonical name (applies to every provider). The
-	// SALAMOONDER_PROXY / IMT_PROXY names are kept as deprecated fallbacks.
-	for _, k := range []string{"CAPTCHA_PROXY", "SALAMOONDER_PROXY", "IMT_PROXY"} {
+	// CAPTCHA_PROXY is the canonical name; IMT_PROXY is a deprecated fallback.
+	for _, k := range []string{"CAPTCHA_PROXY", "IMT_PROXY"} {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
 			return v
 		}
@@ -69,15 +69,37 @@ func proxyURL() string {
 	return ""
 }
 
-// maxSolvesPerRun caps paid solves in a single process run. Override with
-// CAPTCHA_MAX_SOLVES (SALAMOONDER_MAX_SOLVES is a deprecated fallback). Keeps a
-// broken-cookie retry loop from draining funds.
-func maxSolvesPerRun() int {
-	for _, k := range []string{"CAPTCHA_MAX_SOLVES", "SALAMOONDER_MAX_SOLVES"} {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				return n
+// ephemeralProxy reads the settings of the single-use proxy served to the
+// captcha provider for the duration of a solve. Enabled by CAPTCHA_PROXY_LISTEN
+// (the local bind address); CAPTCHA_PROXY_ADVERTISE is the public host:port
+// that reaches it, which the caller is responsible for routing. Nil = disabled.
+func ephemeralProxy() (*microproxy.Config, error) {
+	listen := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_LISTEN"))
+	if listen == "" {
+		return nil, nil
+	}
+	advertise := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_ADVERTISE"))
+	if advertise == "" {
+		return nil, fmt.Errorf("solver: CAPTCHA_PROXY_LISTEN is set but CAPTCHA_PROXY_ADVERTISE is empty — the solver needs the public host:port that reaches %s", listen)
+	}
+	cfg := &microproxy.Config{Listen: listen, Advertise: advertise}
+	// CAPTCHA_PROXY_ALLOW overrides the domains the tunnel may reach.
+	if allow := strings.TrimSpace(os.Getenv("CAPTCHA_PROXY_ALLOW")); allow != "" {
+		for _, d := range strings.Split(allow, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				cfg.Allowed = append(cfg.Allowed, d)
 			}
+		}
+	}
+	return cfg, nil
+}
+
+// maxSolvesPerRun caps paid solves in a single process run. Override with
+// CAPTCHA_MAX_SOLVES. Keeps a broken-cookie retry loop from draining funds.
+func maxSolvesPerRun() int {
+	if v := strings.TrimSpace(os.Getenv("CAPTCHA_MAX_SOLVES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
 		}
 	}
 	return 1
@@ -102,6 +124,13 @@ func New() (*Transport, error) {
 		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	proxy := proxyURL()
+	ephemeral, err := ephemeralProxy()
+	if err != nil {
+		return nil, err
+	}
+	if ephemeral != nil && proxy != "" {
+		return nil, fmt.Errorf("solver: CAPTCHA_PROXY and CAPTCHA_PROXY_LISTEN are mutually exclusive — the API calls would egress through the proxy while the solver egresses from this host, and Datadome rejects that IP mismatch")
+	}
 	if proxy != "" {
 		pu, perr := url.Parse(proxy)
 		if perr != nil {
@@ -110,7 +139,7 @@ func New() (*Transport, error) {
 		base.Proxy = http.ProxyURL(pu)
 	}
 
-	resolver, err := newResolver(resolverConfig{userAgent: ua, proxy: proxy})
+	resolver, err := newResolver(resolverConfig{userAgent: ua, proxy: proxy, ephemeral: ephemeral})
 	if err != nil {
 		return nil, err
 	}

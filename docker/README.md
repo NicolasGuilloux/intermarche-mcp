@@ -1,10 +1,10 @@
-# Docker (Salamoonder solver)
+# Docker (2Captcha solver)
 
 A single static Go binary (~24 MB image). DataDome is cleared over the network
-by the Salamoonder solver — no browser at runtime.
+by the 2Captcha solver — no browser at runtime.
 
 ```bash
-cp .env.example .env          # fill in SALAMOONDER_API_KEY (+ IMT_CONFIG_DIR/proxy/store)
+cp .env.example .env          # fill in TWOCAPTCHA_API_KEY (+ IMT_CONFIG_DIR/proxy/store)
 docker compose up --build     # MCP Streamable HTTP on :8080
 docker compose run --rm intermarche search "lait demi écrémé"
 docker compose run --rm intermarche store search "Lille"
@@ -53,6 +53,6 @@ token; only `orders` and `basket` do.
 
 ## Configuration
 
-All via `.env` (see `../.env.example`): `CAPTCHA_PROVIDER`, `SALAMOONDER_API_KEY`,
-`TWOCAPTCHA_API_KEY`, `CAPTCHA_MAX_SOLVES`, `CAPTCHA_PROXY`, `IMT_CONFIG_DIR` and
-`IMT_USER_AGENT`.
+All via `.env` (see `../.env.example`): `TWOCAPTCHA_API_KEY`,
+`CAPTCHA_MAX_SOLVES`, `CAPTCHA_PROXY` (or `CAPTCHA_PROXY_LISTEN` +
+`CAPTCHA_PROXY_ADVERTISE`), `IMT_CONFIG_DIR` and `IMT_USER_AGENT`.

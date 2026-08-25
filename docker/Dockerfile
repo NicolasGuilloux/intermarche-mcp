@@ -11,7 +11,7 @@ COPY src/ .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /intermarche-mcp .
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-# The Salamoonder solver clears DataDome over the network (internal/solver), so
+# The captcha solver clears DataDome over the network (internal/solver), so
 # there is no browser at runtime — all that's needed is a CA bundle for TLS.
 FROM alpine:3.21
 

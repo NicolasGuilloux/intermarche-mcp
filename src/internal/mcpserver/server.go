@@ -29,8 +29,8 @@ type apiTransport interface {
 }
 
 // dialTransport builds the API transport. Every request is wrapped through the
-// Salamoonder solver (internal/solver), which clears Datadome over the network
-// and caches the cleared cookie. It is the only transport.
+// captcha solver (internal/solver), which clears Datadome over the network and
+// caches the cleared cookie. It is the only transport.
 func dialTransport(_ context.Context) (apiTransport, error) {
 	return solver.New()
 }

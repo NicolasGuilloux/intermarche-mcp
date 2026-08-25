@@ -32,12 +32,12 @@ cd src && go test ./pkg/cart -run TestAdd    # run a single test
 ## API Interaction
 
 The Intermarché website uses Datadome anti-bot protection. Every API call is
-wrapped through a single transport — the **Salamoonder solver**
+wrapped through a single transport — the **captcha solver**
 (`internal/solver`) — which clears Datadome over the network. There is no
 browser anywhere at runtime.
 
-- Solves the Datadome slider via the Salamoonder API (key in
-  `SALAMOONDER_API_KEY`), then calls the API with pure Go `net/http`: **HTTP/1.1
+- Solves the Datadome slider through **2Captcha** (key in
+  `TWOCAPTCHA_API_KEY`), then calls the API with pure Go `net/http`: **HTTP/1.1
   is forced** (Go's default HTTP/2 fingerprint is flagged) and a **full Chrome
   header set** + the device fingerprint (from `itm_device_id`) are sent.
 - The cleared cookie is cached on disk (`<config>/datadome.json`) and reused; a
@@ -45,11 +45,17 @@ browser anywhere at runtime.
   (default 1) so a broken-cookie loop can't drain the balance.
 - **IP binding (important):** Datadome binds the clearance to the IP context of
   the challenge, so the challenge fetch AND the API calls must egress from the
-  same IP. Set a residential proxy via `CAPTCHA_PROXY` (deprecated aliases
-  `SALAMOONDER_PROXY` / `IMT_PROXY`),
+  same IP — and so must 2Captcha's workers, which replay the solve. Set a
+  proxy via `CAPTCHA_PROXY` (deprecated alias `IMT_PROXY`),
   e.g. `http://user:pass@host:port` — used for both. A cookie minted from one IP
   context (e.g. inside a container) can be rejected when used from another; see
   `docker/README.md`.
+- **Single-use proxy:** instead of a standing proxy, set
+  `CAPTCHA_PROXY_LISTEN` + `CAPTCHA_PROXY_ADVERTISE` and `internal/solver/microproxy`
+  serves a CONNECT proxy for the length of one solve — fresh credentials per
+  solve, domain allow list, listener destroyed on return. Exposing the port to
+  2Captcha's workers is left to the operator. Mutually exclusive with
+  `CAPTCHA_PROXY`.
 
 All API calls are proxied through `/api/service{path}` on `www.intermarche.com`. The actual backend microservices live behind this proxy:
 - `/panier/v1/stores/{storeId}/carts` — cart operations (sync-based: full state + events)

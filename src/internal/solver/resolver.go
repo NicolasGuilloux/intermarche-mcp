@@ -5,12 +5,14 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/nover/intermarche-mcp/internal/solver/microproxy"
 )
 
 // Resolver solves a Datadome challenge and returns the cleared `datadome`
 // cookie value. Each implementation wraps a third-party captcha-solving
-// service (Salamoonder, 2Captcha, …). The Transport owns the cookie cache and
-// HTTP plumbing; the Resolver only turns a challenge into a cookie.
+// service. The Transport owns the cookie cache and HTTP plumbing; the Resolver
+// only turns a challenge into a cookie.
 type Resolver interface {
 	// Name identifies the provider for logs and errors.
 	Name() string
@@ -24,20 +26,20 @@ type Resolver interface {
 type resolverConfig struct {
 	userAgent string
 	proxy     string
+	// ephemeral, when set, makes the provider serve its own single-use proxy
+	// for the duration of a solve instead of using a standing one.
+	ephemeral *microproxy.Config
 }
 
-// newResolver selects the captcha provider from CAPTCHA_PROVIDER
-// (salamoonder | 2captcha). Default: salamoonder. The chosen provider
-// validates its own credentials.
+// newResolver builds the captcha provider. CAPTCHA_PROVIDER is still read for
+// compatibility, but 2captcha is the only provider left and the default. The
+// provider validates its own credentials.
 func newResolver(cfg resolverConfig) (Resolver, error) {
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER")))
-	switch provider {
-	case "", "salamoonder":
-		return newSalamoonderResolver(cfg)
-	case "2captcha", "twocaptcha":
+	switch provider := strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))); provider {
+	case "", "2captcha", "twocaptcha":
 		return newTwoCaptchaResolver(cfg)
 	default:
-		return nil, fmt.Errorf("solver: unknown CAPTCHA_PROVIDER %q (want 'salamoonder' or '2captcha')", provider)
+		return nil, fmt.Errorf("solver: unsupported CAPTCHA_PROVIDER %q — 2captcha is the only provider", provider)
 	}
 }
 
