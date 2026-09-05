@@ -16,10 +16,25 @@ import (
 type Resolver interface {
 	// Name identifies the provider for logs and errors.
 	Name() string
-	// Solve solves the Datadome challenge reachable from challengeURL (the API
-	// URL that just returned a 403) and returns the bare `datadome` cookie
-	// value (no "datadome=" prefix, no attributes).
-	Solve(challengeURL string) (string, error)
+	// Solve solves the Datadome challenge described by ch and returns the bare
+	// `datadome` cookie value (no "datadome=" prefix, no attributes).
+	Solve(ch Challenge) (string, error)
+}
+
+// Challenge is the Datadome block a Resolver has to clear.
+//
+// CaptchaURL is the geo.captcha-delivery.com URL DataDome hands back in the
+// body of the 403 itself. Carrying it here matters: the challenge is bound to
+// the request that triggered it — method, headers and all — so it cannot be
+// re-derived by fetching PageURL again (a GET on a POST-only API route answers
+// 405, with no challenge at all). It is empty only when the 403 announced
+// itself through the x-datadome header without a body URL, in which case the
+// Resolver has to go and fetch one.
+type Challenge struct {
+	// PageURL is the URL that returned the 403.
+	PageURL string
+	// CaptchaURL is the captcha URL read from that 403, when it carried one.
+	CaptchaURL string
 }
 
 // resolverConfig carries the settings every provider needs.

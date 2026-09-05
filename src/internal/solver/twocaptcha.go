@@ -75,8 +75,8 @@ func newTwoCaptchaResolver(cfg resolverConfig) (Resolver, error) {
 
 func (r *twoCaptchaResolver) Name() string { return "2captcha" }
 
-func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
-	captchaURL, err := r.fetchCaptchaURL(challengeURL)
+func (r *twoCaptchaResolver) Solve(ch Challenge) (string, error) {
+	captchaURL, err := r.captchaURL(ch)
 	if err != nil {
 		return "", err
 	}
@@ -89,7 +89,7 @@ func (r *twoCaptchaResolver) Solve(challengeURL string) (string, error) {
 
 	client := api2captcha.NewClient(r.apiKey)
 	dd := api2captcha.DataDome{
-		Url:        challengeURL,
+		Url:        ch.PageURL,
 		CaptchaUrl: captchaURL,
 		UserAgent:  r.userAgent,
 		Proxytype:  access.proxyType,
@@ -194,6 +194,20 @@ func (r *twoCaptchaResolver) workerAccess() (*workerAccess, error) {
 	return access, nil
 }
 
+// captchaURL returns the geo.captcha-delivery.com URL 2Captcha needs.
+//
+// The 403 that triggered the solve normally carries it, and that one is
+// authoritative: DataDome mints a challenge per request, so refetching PageURL
+// would only work if the same method and headers were replayed — a GET on a
+// POST-only API route answers 405 and no challenge at all. Fetching is the
+// fallback for a 403 that announced itself through the x-datadome header alone.
+func (r *twoCaptchaResolver) captchaURL(ch Challenge) (string, error) {
+	if ch.CaptchaURL != "" {
+		return canonicalSliderURL(ch.CaptchaURL)
+	}
+	return r.fetchCaptchaURL(ch.PageURL)
+}
+
 // fetchCaptchaURL fetches the challenge from the egress the workers will use
 // (the standing proxy, or this host when the proxy is ephemeral) and extracts
 // the geo.captcha-delivery.com captcha URL 2Captcha needs.
@@ -220,7 +234,7 @@ func (r *twoCaptchaResolver) fetchCaptchaURL(challengeURL string) (string, error
 	if json.Unmarshal(raw, &body) == nil && strings.Contains(body.URL, "captcha-delivery.com") {
 		return canonicalSliderURL(body.URL)
 	}
-	return "", fmt.Errorf("solver: no Datadome challenge present (status %d) — nothing to solve", resp.StatusCode)
+	return "", fmt.Errorf("solver: GET %s returned %d with no Datadome challenge, and the 403 that triggered the solve carried no captcha URL — nothing to solve", challengeURL, resp.StatusCode)
 }
 
 // splitProxy turns a "scheme://user:pass@host:port" URL into the (type, auth)

@@ -174,7 +174,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, isDD := datadomeCaptcha(resp)
+	captchaURL, isDD := datadomeCaptcha(resp)
 	if !isDD {
 		return resp, nil
 	}
@@ -190,7 +190,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	fmt.Fprintf(os.Stderr, "solver: Datadome 403 on %s — solving with %s (this costs one credit)\n", req.URL.Path, t.resolver.Name())
-	if err := t.solve(req.URL.String()); err != nil {
+	if err := t.solve(Challenge{PageURL: req.URL.String(), CaptchaURL: captchaURL}); err != nil {
 		return nil, err
 	}
 
@@ -245,15 +245,16 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 // solve delegates the DataDome solve to the configured provider and caches the
 // returned cookie.
 //
-// challengeURL is the URL that just returned a Datadome 403 (the failing API
-// endpoint); the resolver fetches it so the freshly minted cid is bound to the
-// SAME egress that will solve the challenge.
-func (t *Transport) solve(challengeURL string) error {
-	if challengeURL == "" {
-		challengeURL = target
+// ch describes the 403 that was just received. Its CaptchaURL is the one
+// DataDome minted for THAT request, from this process' egress — the same one
+// the workers are given — so it is handed straight to the resolver rather than
+// being fetched again.
+func (t *Transport) solve(ch Challenge) error {
+	if ch.PageURL == "" {
+		ch.PageURL = target
 	}
 
-	solved, err := t.resolver.Solve(challengeURL)
+	solved, err := t.resolver.Solve(ch)
 	if err != nil {
 		return err
 	}
