@@ -25,8 +25,8 @@ cd src && go test ./pkg/cart -run TestAdd    # run a single test
 - **Language**: Go (module: `github.com/nover/intermarche-mcp`)
 - **Local state**: JSON files in the config dir (`tokens.json`, `store.json`,
   `datadome.json`) — `~/.config/intermarche-mcp` (Linux) /
-  `~/Library/Application Support/intermarche-mcp` (macOS), overridable with
-  `XDG_CONFIG_HOME`.
+  `~/Library/Application Support/intermarche-mcp` (macOS) — `os.UserConfigDir`,
+  so `XDG_CONFIG_HOME` only overrides it on Linux.
 - **Entry point**: `main.go` — subcommand dispatch (`orders`, `search`, `basket`)
 
 ## API Interaction
@@ -42,7 +42,11 @@ browser anywhere at runtime.
   header set** + the device fingerprint (from `itm_device_id`) are sent.
 - The cleared cookie is cached on disk (`<config>/datadome.json`) and reused; a
   credit is only spent on an actual 403. Capped by `CAPTCHA_MAX_SOLVES`
-  (default 1) so a broken-cookie loop can't drain the balance.
+  per sliding 5-minute window (default 1) so a broken-cookie loop can't drain
+  the balance. On a 403 the cached cookie is dropped and the call retried
+  without it first (free): DataDome can flag the cookie itself (`t=bv`) while
+  the IP is fine. A `t=bv` with no cookie sent is never solved. Cookies DataDome
+  sets via `Set-Cookie` are NOT cached — they are refused on the next call.
 - **IP binding (important):** Datadome binds the clearance to the IP context of
   the challenge, so the challenge fetch AND the API calls must egress from the
   same IP — and so must 2Captcha's workers, which replay the solve. Set a
@@ -52,8 +56,8 @@ browser anywhere at runtime.
   `docker/README.md`.
 - **Single-use proxy:** instead of a standing proxy, `internal/solver/microproxy`
   serves a CONNECT proxy for the length of one solve — fresh credentials per
-  solve, domain allow list (incl. `ident.me`/`tnedi.me`, which the workers use to
-  check the IP they were given), listener destroyed on return. Mutually
+  solve, domain allow list (incl. `ident.me`/`tnedi.me`/`ip-api.com`/`worldtimeapi.org`,
+  which the workers use to check the IP they were given), listener destroyed on return. Mutually
   exclusive with `CAPTCHA_PROXY`. Two ways to expose it, via
   `CAPTCHA_PROXY_ADVERTISE`:
   - `ngrok` — `internal/solver/ngroktunnel.go` opens a TCP tunnel through the

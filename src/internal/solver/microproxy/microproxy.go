@@ -41,7 +41,9 @@ const (
 
 // defaultAllowed covers what a Datadome solve legitimately needs: the site
 // that issued the challenge, the captcha delivery network, and the echo
-// services 2Captcha's workers use to confirm which IP the proxy gives them.
+// services 2Captcha's workers use to confirm which IP the proxy gives them
+// (ident.me/tnedi.me), plus the geolocation and timezone lookups they run on
+// it (ip-api.com, worldtimeapi.org) — read-only endpoints, harmless to allow.
 // Their browser also reaches for google.com and friends; refusing that noise
 // does not disturb the solve.
 var defaultAllowed = []string{
@@ -49,6 +51,8 @@ var defaultAllowed = []string{
 	"captcha-delivery.com",
 	"ident.me",
 	"tnedi.me",
+	"ip-api.com",
+	"worldtimeapi.org",
 }
 
 // defaultPorts keeps the tunnel to normal web traffic.

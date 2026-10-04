@@ -145,10 +145,10 @@ Configured entirely through environment variables (see [`.env.example`](.env.exa
 | `CAPTCHA_PROXY` | solver | Standing proxy for challenge fetch + API calls, also handed to 2Captcha's workers. Alias: `IMT_PROXY`. |
 | `CAPTCHA_PROXY_LISTEN` | solver | Local bind address of the single-use proxy. Not needed with `CAPTCHA_PROXY_ADVERTISE=ngrok`. Excludes `CAPTCHA_PROXY`. |
 | `CAPTCHA_PROXY_ADVERTISE` | solver | Public `host:port` reaching that listener. `ngrok` opens a tunnel per solve instead; `ngrok:<agent-api>` reads one from a running agent. |
-| `CAPTCHA_PROXY_ALLOW` | solver | Domains the single-use proxy may tunnel to (default `intermarche.com,captcha-delivery.com,ident.me,tnedi.me`). |
+| `CAPTCHA_PROXY_ALLOW` | solver | Domains the single-use proxy may tunnel to (default `intermarche.com,captcha-delivery.com,ident.me,tnedi.me,ip-api.com,worldtimeapi.org`). |
 | `NGROK_AUTHTOKEN` | solver / ngrok agent | ngrok credential. Required when `CAPTCHA_PROXY_ADVERTISE=ngrok`, which opens the tunnel per solve. |
 | `NGROK_REGION` | ngrok agent | Edge region, for an externally-run agent only: `us` (default), `eu`, `ap`, `au`, `sa`, `jp`, `in`. |
-| `CAPTCHA_MAX_SOLVES` | solver | Cap on paid solves per run (default 1). |
+| `CAPTCHA_MAX_SOLVES` | solver | Cap on paid solves per sliding 5-minute window (default 1). |
 | `IMT_USER_AGENT` | solver | Override the Chrome User-Agent sent with requests. |
 
 State (OAuth tokens, selected store, cached DataDome cookie) lives in the config
@@ -161,7 +161,7 @@ intermarche.com is protected by DataDome. Every API call is wrapped through a
 captcha **solver** that clears the challenge over the network (no browser).
 A solve is only ever triggered on an actual `403` and is **paid**, so the
 cleared cookie is cached on disk and the steady state costs zero credits
-(capped by `CAPTCHA_MAX_SOLVES`, default 1).
+(capped by `CAPTCHA_MAX_SOLVES` per 5 minutes, default 1).
 
 The solver is **2Captcha**:
 

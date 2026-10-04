@@ -49,11 +49,11 @@ type Transport struct {
 
 	proxy string // shared HTTP/S proxy for challenge fetch + API calls
 
-	mu         sync.Mutex
-	cache      cache
-	cachePath  string
-	solveCount int
-	maxSolves  int // hard cap per process to protect the account balance
+	mu        sync.Mutex
+	cache     cache
+	cachePath string
+	solves    []time.Time // solves started within the last solveWindow
+	maxSolves int         // cap per solveWindow to protect the account balance
 }
 
 // proxyURL reads the residential proxy used for BOTH the challenge fetch and
@@ -99,9 +99,14 @@ func ephemeralProxy() (*microproxy.Config, error) {
 	return cfg, nil
 }
 
-// maxSolvesPerRun caps paid solves in a single process run. Override with
+// solveWindow is the sliding window CAPTCHA_MAX_SOLVES applies to. A window
+// rather than a per-process total, so a long-running MCP server can still
+// renew a cookie that expires hours later.
+const solveWindow = 5 * time.Minute
+
+// maxSolvesPerWindow caps paid solves per solveWindow. Override with
 // CAPTCHA_MAX_SOLVES. Keeps a broken-cookie retry loop from draining funds.
-func maxSolvesPerRun() int {
+func maxSolvesPerWindow() int {
 	if v := strings.TrimSpace(os.Getenv("CAPTCHA_MAX_SOLVES")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
@@ -155,7 +160,7 @@ func New() (*Transport, error) {
 		userAgent: ua,
 		proxy:     proxy,
 		cachePath: filepath.Join(dir, "datadome.json"),
-		maxSolves: maxSolvesPerRun(),
+		maxSolves: maxSolvesPerWindow(),
 	}
 	t.loadCache()
 	if t.cache.DeviceID == "" {
@@ -168,7 +173,8 @@ func New() (*Transport, error) {
 func (t *Transport) deviceFP() string { return "ghost_" + t.cache.DeviceID }
 
 // RoundTrip sends the request with the cached cookie (HTTP/1.1 + Chrome
-// headers). On a Datadome 403 captcha it solves once, caches, and retries.
+// headers). On a Datadome 403 it first retries without the cookie (free),
+// and only then solves once, caches, and retries.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.do(req)
 	if err != nil {
@@ -178,15 +184,33 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !isDD {
 		return resp, nil
 	}
-
-	// Stale/missing cookie — spend one solve, then retry once.
 	resp.Body.Close()
 
-	t.mu.Lock()
-	over := t.solveCount >= t.maxSolves
-	t.mu.Unlock()
-	if over {
-		return nil, fmt.Errorf("solver: Datadome 403 but solve cap reached (%d) — refusing to spend more credits this run; set CAPTCHA_MAX_SOLVES to raise it", t.maxSolves)
+	// The cached cookie may be the culprit rather than the IP: DataDome flags
+	// the cid itself (a solver-minted cookie can come back t=bv while the same
+	// IP without it gets a 200). Dropping it costs nothing, so try that first.
+	if sent := sentDatadome(req); sent != "" {
+		t.dropCookie(sent)
+		fmt.Fprintf(os.Stderr, "solver: Datadome 403 on %s with the cached cookie — dropped it, retrying without\n", req.URL.Path)
+		rewind(req)
+		if resp, err = t.do(req); err != nil {
+			return nil, err
+		}
+		if captchaURL, isDD = datadomeCaptcha(resp); !isDD {
+			return resp, nil
+		}
+		resp.Body.Close()
+	}
+
+	// t=bv without any cookie means DataDome has banned this client outright:
+	// a solve still returns a cookie, but it is refused on the very next call,
+	// so the credit is wasted.
+	if ipBanned(captchaURL) {
+		return nil, fmt.Errorf("solver: Datadome blocks this client even without a cookie (challenge t=bv) — solving cannot help, no credit spent; retry from another IP (CAPTCHA_PROXY with a residential FR proxy, or another network)")
+	}
+
+	if !t.reserveSolve() {
+		return nil, fmt.Errorf("solver: Datadome 403 but solve cap reached (%d per %s) — refusing to spend more credits for now; set CAPTCHA_MAX_SOLVES to raise it (%s)", t.maxSolves, solveWindow, describeBlock(resp, captchaURL))
 	}
 
 	fmt.Fprintf(os.Stderr, "solver: Datadome 403 on %s — solving with %s (this costs one credit)\n", req.URL.Path, t.resolver.Name())
@@ -194,13 +218,58 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
+	rewind(req)
+	resp, err = t.do(req)
+	if err != nil {
+		return nil, err
+	}
+	// A cookie that is refused straight after the solve is not stale: the
+	// clearance does not match this request's IP or fingerprint. Handing the
+	// bare 403 back would only surface as an opaque status code.
+	if captchaURL, isDD := datadomeCaptcha(resp); isDD {
+		resp.Body.Close()
+		return nil, fmt.Errorf("solver: Datadome still answers 403 with the freshly solved cookie (%s) — the solve and this request must egress from the same IP", describeBlock(resp, captchaURL))
+	}
+	return resp, nil
+}
+
+// rewind restores the request body so the request can be sent again.
+func rewind(req *http.Request) {
 	if req.GetBody != nil {
-		body, bErr := req.GetBody()
-		if bErr == nil {
+		if body, err := req.GetBody(); err == nil {
 			req.Body = body
 		}
 	}
-	return t.do(req)
+}
+
+// sentDatadome returns the datadome cookie value the request went out with.
+func sentDatadome(req *http.Request) string {
+	for _, part := range strings.Split(req.Header.Get("Cookie"), ";") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "datadome="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// dropCookie forgets the cached cookie, unless another request has already
+// replaced it with a newer one.
+func (t *Transport) dropCookie(value string) {
+	t.mu.Lock()
+	if t.cache.Datadome != value {
+		t.mu.Unlock()
+		return
+	}
+	t.cache.Datadome = ""
+	t.mu.Unlock()
+	t.saveCache()
+}
+
+// ipBanned reports whether the captcha URL is DataDome's "blocked" variant
+// (t=bv), as opposed to a regular challenge (t=fe).
+func ipBanned(captchaURL string) bool {
+	u, err := url.Parse(captchaURL)
+	return err == nil && u.Query().Get("t") == "bv"
 }
 
 func (t *Transport) do(req *http.Request) (*http.Response, error) {
@@ -242,6 +311,28 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
+// reserveSolve takes a slot in the current window, or reports that none is
+// left. The slot is taken before the solve starts so concurrent 403s cannot
+// all slip under the cap, and it is kept even if the solve fails: a failed
+// solve may still have been billed.
+func (t *Transport) reserveSolve() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	recent := t.solves[:0]
+	for _, at := range t.solves {
+		if now.Sub(at) < solveWindow {
+			recent = append(recent, at)
+		}
+	}
+	t.solves = recent
+	if len(t.solves) >= t.maxSolves {
+		return false
+	}
+	t.solves = append(t.solves, now)
+	return true
+}
+
 // solve delegates the DataDome solve to the configured provider and caches the
 // returned cookie.
 //
@@ -265,12 +356,11 @@ func (t *Transport) solve(ch Challenge) error {
 	t.mu.Lock()
 	t.cache.Datadome = solved
 	t.cache.Solved = time.Now().Format(time.RFC3339)
-	t.solveCount++
-	n := t.solveCount
+	n := len(t.solves)
 	t.mu.Unlock()
 	t.saveCache()
 
-	fmt.Fprintf(os.Stderr, "solver: ⚠️  solved (%d credit(s) used this run); cookie cached at %s\n", n, t.cachePath)
+	fmt.Fprintf(os.Stderr, "solver: ⚠️  solved (%d credit(s) used in the last %s); cookie cached at %s\n", n, solveWindow, t.cachePath)
 	return nil
 }
 
@@ -324,6 +414,16 @@ func datadomeCaptcha(resp *http.Response) (string, bool) {
 		return body.URL, true
 	}
 	return "", resp.Header.Get("x-datadome") != ""
+}
+
+// describeBlock summarises a Datadome 403 for error messages: the challenge
+// type (t=fe is a fresh challenge, t=bv a banned IP) and the x-datadome-cid.
+func describeBlock(resp *http.Response, captchaURL string) string {
+	kind := "-"
+	if u, err := url.Parse(captchaURL); err == nil && captchaURL != "" {
+		kind = u.Path + " t=" + u.Query().Get("t")
+	}
+	return fmt.Sprintf("challenge %s, x-datadome=%q", kind, resp.Header.Get("x-datadome"))
 }
 
 func setIfAbsent(req *http.Request, key, val string) {
